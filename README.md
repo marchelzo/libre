@@ -1,10 +1,10 @@
 libre
 =====
 
-##### libre is a tiny regular expression library for C
+#### libre is a tiny regular expression library for C
 
 libre compiles regular expressions into NFAs for reasonably
-fast matching speeds. Its interface is very simple. It exposes
+fast matching speeds. Its interface is very simple; it exposes
 three functions, all of which are self-explanatory.
 
 ```c
@@ -15,12 +15,14 @@ bool re_match(re_pat const *, char const *)
 void re_free(re_pat *)
 ```
 
+#### Usage
+
 To use libre, simply clone this repository and run `make && sudo make install`.
 
 
-###### Here is a small example of libre being used
+#### Example
 
-```
+```c
 #include <re.h>
 #include <stdio.h>
 #include <assert.h>
