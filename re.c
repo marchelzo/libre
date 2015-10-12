@@ -11,7 +11,10 @@
 #include "re.h"
 
 enum {
-        NFA_EPSILON = UINT16_MAX
+        NFA_EPSILON = UINT16_MAX,
+        NFA_ANYCHAR = UINT16_MAX - 1,
+        NFA_BEGIN   = UINT16_MAX - 2,
+        NFA_END     = UINT16_MAX - 3
 };
 
 struct re {
@@ -21,11 +24,18 @@ struct re {
                 RE_STAR,
                 RE_PLUS,
                 RE_OPTION,
-                RE_CONCAT
+                RE_DOT,
+                RE_CONCAT,
+                RE_RANGE
         } type;
 
         union {
-                unsigned char c;
+                uint8_t c;
+
+                struct {
+                        uint8_t low;
+                        uint8_t high;
+                };
 
                 struct {
                         struct re *left;
@@ -90,7 +100,8 @@ transition(struct re_nfa *nfa, size_t from, size_t to, uint16_t type)
 }
 
 
-static size_t tonfa(struct re_nfa *nfa, size_t start, struct re *re)
+static size_t
+tonfa(struct re_nfa *nfa, size_t start, struct re *re)
 {
         size_t a, b, c;
         size_t t, v;
@@ -99,6 +110,10 @@ static size_t tonfa(struct re_nfa *nfa, size_t start, struct re *re)
         case RE_CHAR:
                 a = addstate(nfa);
                 transition(nfa, start, a, re->c);
+                return a;
+        case RE_RANGE:
+                a = addstate(nfa);
+                transition(nfa, start, a, (re->low << 8) + re->high);
                 return a;
         case RE_ALT:
                 /* End state */
@@ -188,6 +203,14 @@ static size_t tonfa(struct re_nfa *nfa, size_t start, struct re *re)
                 transition(nfa, start, a, NFA_EPSILON);
 
                 return b;
+        case RE_DOT:
+                /* End state */
+                b = addstate(nfa);
+
+                /* Link start to end */
+                transition(nfa, start, b, NFA_ANYCHAR);
+
+                return b;
         case RE_CONCAT:
                 t = start;
 
@@ -203,6 +226,40 @@ static size_t tonfa(struct re_nfa *nfa, size_t start, struct re *re)
 static struct re *regexp(char const **, bool allow_trailing);
 static struct re *subexp(char const **);
 static struct re *atom(char const **);
+static struct re *charclass(char const **);
+
+static void
+freere(struct re *re)
+{
+        if (re->type == RE_ALT) {
+                freere(re->left);
+                freere(re->right);
+        } else if (re->type == RE_CONCAT) {
+                for (size_t i = 0; i < re->res.size; ++i) {
+                        freere(re->res.items[i]);
+                }
+                vec_empty(re->res);
+        }
+
+        free(re);
+}
+
+static struct re *
+or(struct re *left, struct re *right)
+{
+        if (left == NULL) {
+                return right;
+        } else if (right == NULL) {
+                return left;
+        }
+
+        struct re *e;
+        mkre(e);
+        e->type  = RE_ALT;
+        e->left  = left;
+        e->right = right;
+        return e;
+}
 
 static struct re *
 regexp(char const **s, bool allow_trailing)
@@ -260,7 +317,7 @@ subexp(char const **s)
 
         switch (**s) {
         case '*': ++*s; type = RE_STAR;   break;
-        case '+': ++*s; type = RE_PLUS;  break;
+        case '+': ++*s; type = RE_PLUS;   break;
         case '?': ++*s; type = RE_OPTION; break;
         default:                          break;
         }
@@ -279,7 +336,7 @@ subexp(char const **s)
 static struct re *
 atom(char const **s)
 {
-        if (!**s || **s == ')') {
+        if (**s == '\0' || **s == ')') {
                 return NULL;
         }
 
@@ -296,7 +353,27 @@ atom(char const **s)
                         return NULL;
                 }
                 *s += 1;
-                
+                return e;
+        } else if (**s == '.') {
+                struct re *e;
+                mkre(e);
+                e->type = RE_DOT;
+                *s += 1;
+                return e;
+        } else if (**s == '[') {
+                *s += 1;
+                return charclass(s);
+        } else if (**s == '\\') {
+                struct re *e;
+                *s += 1;
+                if (**s == '\0') {
+                        /* The regular expression cannot end with a backslash */
+                        return NULL;
+                }
+                mkre(e);
+                e->type = RE_CHAR;
+                e->c    = **s;
+                *s += 1;
                 return e;
         } else {
                 struct re *e;
@@ -304,9 +381,46 @@ atom(char const **s)
                 e->type = RE_CHAR;
                 e->c    = **s;
                 *s += 1;
-
                 return e;
         }
+}
+
+static struct re *
+charclass(char const **s)
+{
+        if (**s == '\0') {
+                return NULL;
+        }
+
+        struct re *e = NULL;
+        struct re *c;
+        for (size_t i = 0; **s != '\0'; ++i, ++*s) {
+                if (**s == ']' && i != 0) {
+                        break;
+                }
+                mkre(c);
+                if ((*s)[1] == '-' && (*s)[2] != '\0' && (*s)[2] != ']') {
+                        c->type = RE_RANGE;
+                        c->low  = (*s)[0];
+                        c->high = (*s)[2];
+                        *s += 2;
+                } else {
+                        c->type = RE_CHAR;
+                        c->c    = **s;
+                }
+                e = or(e, c);
+                if (e == NULL) {
+                        goto fail;
+                }
+        }
+        if (**s == '\0') {
+                goto fail;
+        }
+        *s += 1;
+        return e;
+fail:
+        freere(e);
+        return NULL;
 }
 
 static struct re *
@@ -316,22 +430,43 @@ parse(char const *s)
 }
 
 static bool
-charmatch(char const **s, uint16_t t)
+charmatch(char const **s, uint16_t t, char const *begin)
 {
         if (t == NFA_EPSILON) {
                 return true;
         }
 
-        if (**s != t) {
-                return false;
+        if (t == NFA_ANYCHAR) {
+                *s += 1;
+                return true;
         }
 
-        *s += 1;
-        return true;
+        if (t == NFA_BEGIN) {
+                return *s == begin;
+        }
+
+        if (t == NFA_END) {
+                return **s == '\0';
+        }
+
+        if (t > UINT8_MAX) {
+                if (**s < (t >> 8) || **s > (t & 0xFF)) {
+                        return false;
+                }
+                *s += 1;
+                return true;
+        }
+
+        if (**s == t) {
+                *s += 1;
+                return true;
+        }
+
+        return false;
 }
 
 static bool
-domatch(struct st const *state, char const *s)
+domatch(struct st const *state, char const *s, char const *begin)
 {
         char const *save;
 
@@ -339,15 +474,15 @@ domatch(struct st const *state, char const *s)
                 assert(state->two.s == NULL);
                 return true;
         }
-        
+
         save = s;
 
-        if (charmatch(&s, state->one.t) && domatch(state->one.s, s)) {
+        if (charmatch(&s, state->one.t, begin) && domatch(state->one.s, s, begin)) {
                 return true;
         }
 
         if (state->two.s != NULL) {
-                return domatch(state->two.s, save);
+                return domatch(state->two.s, save, begin);
         }
 
         return false;
@@ -356,7 +491,17 @@ domatch(struct st const *state, char const *s)
 bool
 re_match(struct re_nfa const *nfa, char const *s)
 {
-        return domatch(nfa->states.items[0], s);
+        if (domatch(nfa->states.items[0], s, s)) {
+                return true;
+        }
+
+        while (*++s) {
+                if (domatch(nfa->states.items[0], s, NULL)) {
+                        return true;
+                }
+        }
+
+        return false;
 }
 
 re_pat *
@@ -379,6 +524,8 @@ re_compile(char const *s)
 
         addstate(nfa);
         tonfa(nfa, 0, re);
+
+        freere(re);
 
         return nfa;
 }
