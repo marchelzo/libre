@@ -35,18 +35,16 @@ int main(void)
                 return 1;
         }
 
-        struct re_result m;
+        assert(re_match(p, "https://www.google.ca", NULL));
+        assert(re_match(p, "http://www.google.ca", NULL));
+        assert(re_match(p, "https://www.google.com", NULL));
+        assert(re_match(p, "https://www.google.com", NULL));
+        assert(re_match(p, "www.google.ca", NULL));
+        assert(re_match(p, "www.google.com", NULL));
 
-        assert(re_match(p, "https://www.google.ca", &m));
-        assert(re_match(p, "http://www.google.ca", &m));
-        assert(re_match(p, "https://www.google.com", &m));
-        assert(re_match(p, "https://www.google.com", &m));
-        assert(re_match(p, "www.google.ca", &m));
-        assert(re_match(p, "www.google.com", &m));
-
-        assert(!re_match(p, "www.github.com", &m));
-        assert(!re_match(p, "http://google.com", &m));
-        assert(!re_match(p, "http://google.ca", &m));
+        assert(!re_match(p, "www.github.com", NULL));
+        assert(!re_match(p, "http://google.com", NULL));
+        assert(!re_match(p, "http://google.ca", NULL));
 
         re_free(p);
 
