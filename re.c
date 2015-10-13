@@ -513,15 +513,19 @@ re_match(struct re_nfa const *nfa, char const *s, struct re_result *result)
 {
         char *end;
         if (end = domatch(nfa->states.items[0], s, s), end != NULL) {
-                result->start = s;
-                result->end   = end;
+                if (result != NULL) {
+                        result->start = s;
+                        result->end   = end;
+                }
                 return true;
         }
 
         while (*++s) {
                 if (end = domatch(nfa->states.items[0], s, NULL), end != NULL) {
-                        result->start = s;
-                        result->end   = end;
+                        if (result != NULL) {
+                                result->start = s;
+                                result->end   = end;
+                        }
                         return true;
                 }
         }
