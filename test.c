@@ -18,8 +18,9 @@ int main(int argc, char **argv)
               , { "thi was is fun", false }
         };
 
+        struct re_result m;
         for (size_t i = 0; i < sizeof tests / sizeof tests[0]; ++i) {
-                if (re_match(re, tests[i].s) != tests[i].e) {
+                if (re_match(re, tests[i].s, &m) != tests[i].e) {
                         fprintf(stderr, "Test failed: `%s`\n", tests[i].s);
                 }
         }
@@ -31,11 +32,15 @@ int main(int argc, char **argv)
         }
 
         re = re_compile(argv[1]);
+        if (re == NULL) {
+                fprintf(stderr, "Failed to compile regular expression: `%s`\n", argv[1]);
+                return 1;
+        }
 
         while (fgets(buffer, sizeof buffer, stdin)) {
                 buffer[strcspn(buffer, "\n")] = 0;
-                if (re_match(re, buffer)) {
-                        puts("Match!");
+                if (re_match(re, buffer, &m)) {
+                        printf("Match: `%.*s`\n", (int) (m.end - m.start), m.start);
                 } else {
                         puts("No match!");
                 }
