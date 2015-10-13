@@ -10,7 +10,7 @@ three functions, all of which are self-explanatory.
 ```c
 re_pat *re_compile(char const *)
 
-bool re_match(re_pat const *, char const *)
+bool re_match(re_pat const *, char const *, struct re_result *)
 
 void re_free(re_pat *)
 ```
@@ -29,22 +29,24 @@ To use libre, simply clone this repository and run `make && sudo make install`.
 
 int main(void)
 {
-        re_pat *p = re_compile("(https?://)?www.google.(ca|com)");
+        re_pat *p = re_compile("(https?://)?www\\.google\\.(ca|com)");
         if (p == NULL) {
                 fputs("Failed to compile regular expression.\n", stderr);
                 return 1;
         }
 
-        assert(re_match(p, "https://www.google.ca"));
-        assert(re_match(p, "http://www.google.ca"));
-        assert(re_match(p, "https://www.google.com"));
-        assert(re_match(p, "https://www.google.com"));
-        assert(re_match(p, "www.google.ca"));
-        assert(re_match(p, "www.google.com"));
+        struct re_result m;
 
-        assert(!re_match(p, "www.github.com"));
-        assert(!re_match(p, "http://google.com"));
-        assert(!re_match(p, "http://google.ca"));
+        assert(re_match(p, "https://www.google.ca", &m));
+        assert(re_match(p, "http://www.google.ca", &m));
+        assert(re_match(p, "https://www.google.com", &m));
+        assert(re_match(p, "https://www.google.com", &m));
+        assert(re_match(p, "www.google.ca", &m));
+        assert(re_match(p, "www.google.com", &m));
+
+        assert(!re_match(p, "www.github.com", &m));
+        assert(!re_match(p, "http://google.com", &m));
+        assert(!re_match(p, "http://google.ca", &m));
 
         re_free(p);
 

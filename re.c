@@ -26,7 +26,9 @@ struct re {
                 RE_OPTION,
                 RE_DOT,
                 RE_CONCAT,
-                RE_RANGE
+                RE_RANGE,
+                RE_BEGIN,
+                RE_END
         } type;
 
         union {
@@ -114,6 +116,14 @@ tonfa(struct re_nfa *nfa, size_t start, struct re *re)
         case RE_RANGE:
                 a = addstate(nfa);
                 transition(nfa, start, a, (re->low << 8) + re->high);
+                return a;
+        case RE_BEGIN:
+                a = addstate(nfa);
+                transition(nfa, start, a, NFA_BEGIN);
+                return a;
+        case RE_END:
+                a = addstate(nfa);
+                transition(nfa, start, a, NFA_END);
                 return a;
         case RE_ALT:
                 /* End state */
@@ -346,25 +356,34 @@ atom(char const **s)
          * a `regexp`; otherwise, we match
          * one character.
          */
+        struct re *e;
         if (**s == '(') {
                 *s += 1;
-                struct re *e = regexp(s, true);
+                e = regexp(s, true);
                 if (**s != ')') {
                         return NULL;
                 }
                 *s += 1;
                 return e;
         } else if (**s == '.') {
-                struct re *e;
                 mkre(e);
                 e->type = RE_DOT;
+                *s += 1;
+                return e;
+        } else if (**s == '^') {
+                mkre(e);
+                e->type = RE_BEGIN;
+                *s += 1;
+                return e;
+        } else if (**s == '$') {
+                mkre(e);
+                e->type = RE_END;
                 *s += 1;
                 return e;
         } else if (**s == '[') {
                 *s += 1;
                 return charclass(s);
         } else if (**s == '\\') {
-                struct re *e;
                 *s += 1;
                 if (**s == '\0') {
                         /* The regular expression cannot end with a backslash */
@@ -376,7 +395,6 @@ atom(char const **s)
                 *s += 1;
                 return e;
         } else {
-                struct re *e;
                 mkre(e);
                 e->type = RE_CHAR;
                 e->c    = **s;
@@ -465,38 +483,45 @@ charmatch(char const **s, uint16_t t, char const *begin)
         return false;
 }
 
-static bool
+static char *
 domatch(struct st const *state, char const *s, char const *begin)
 {
-        char const *save;
+        char const *save, *end;
 
         if (state->one.s == NULL) {
                 assert(state->two.s == NULL);
-                return true;
+                return s;
         }
 
         save = s;
 
-        if (charmatch(&s, state->one.t, begin) && domatch(state->one.s, s, begin)) {
-                return true;
+        if (charmatch(&s, state->one.t, begin)) {
+                if (end = domatch(state->one.s, s, begin), end != NULL) {
+                        return end;
+                }
         }
 
         if (state->two.s != NULL) {
                 return domatch(state->two.s, save, begin);
         }
 
-        return false;
+        return NULL;
 }
 
 bool
-re_match(struct re_nfa const *nfa, char const *s)
+re_match(struct re_nfa const *nfa, char const *s, struct re_result *result)
 {
-        if (domatch(nfa->states.items[0], s, s)) {
+        char *end;
+        if (end = domatch(nfa->states.items[0], s, s), end != NULL) {
+                result->start = s;
+                result->end   = end;
                 return true;
         }
 
         while (*++s) {
-                if (domatch(nfa->states.items[0], s, NULL)) {
+                if (end = domatch(nfa->states.items[0], s, NULL), end != NULL) {
+                        result->start = s;
+                        result->end   = end;
                         return true;
                 }
         }
