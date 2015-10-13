@@ -481,8 +481,12 @@ charmatch(char const **s, uint16_t t, char const *begin)
         }
 
         if (t == NFA_ANYCHAR) {
-                *s += 1;
-                return true;
+                if (**s != '\0') {
+                        *s += 1;
+                        return true;
+                } else {
+                        return false;
+                }
         }
 
         if (t == NFA_BEGIN) {
