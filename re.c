@@ -6,8 +6,6 @@
 #include <limits.h>
 #include <assert.h>
 
-#include <vec.h>
-
 #include "re.h"
 
 enum {
@@ -45,21 +43,24 @@ struct re {
                 };
 
                 struct re *re;
-
-                vec(struct re *) res;
         };
 };
 
 struct st {
         struct {
-                struct st *s;
+                union {
+                        struct st *s;
+                        size_t idx;
+                };
                 uint16_t t;
         } one, two;
 };
 
 
 struct re_nfa {
-        vec(struct st *) states;
+        struct st *states;
+        size_t count;
+        size_t alloc;
 };
 
 /*
@@ -74,33 +75,53 @@ struct re_nfa {
 size_t
 addstate(struct re_nfa *nfa)
 {
-        struct st *state, **out;
-        state = malloc(sizeof *state);
+        if (nfa->count == nfa->alloc) {
+                nfa->alloc = nfa->alloc ? nfa->alloc * 2 : 4;
+                struct st *tmp = realloc(nfa->states, nfa->alloc * sizeof *tmp);
+                if (tmp == NULL) {
+                        assert(false);
+                }
+                nfa->states = tmp;
+        }
 
-        assert(state != NULL);
+        nfa->states[nfa->count].one.idx = -1;
+        nfa->states[nfa->count].two.idx = -1;
 
-        state->one.s = NULL;
-        state->two.s = NULL;
+        nfa->count += 1;
 
-        vec_push(nfa->states, state, out);
-
-        return nfa->states.size - 1;
+        return nfa->count - 1;
 }
 
 static void
 transition(struct re_nfa *nfa, size_t from, size_t to, uint16_t type)
 {
-        if (nfa->states.items[from]->one.s == NULL) {
-                nfa->states.items[from]->one.s = nfa->states.items[to];
-                nfa->states.items[from]->one.t = type;
-        } else if (nfa->states.items[from]->two.s == NULL) {
-                nfa->states.items[from]->two.s = nfa->states.items[to];
-                nfa->states.items[from]->two.t = type;
+        if (nfa->states[from].one.idx == SIZE_MAX) {
+                nfa->states[from].one.idx = to;
+                nfa->states[from].one.t = type;
+        } else if (nfa->states[from].two.idx == SIZE_MAX) {
+                nfa->states[from].two.idx = to;
+                nfa->states[from].two.t = type;
         } else {
                 assert(false);
         }
 }
 
+static void
+complete(struct re_nfa *nfa)
+{
+        for (size_t i = 0; i < nfa->count; ++i) {
+                if (nfa->states[i].one.idx != SIZE_MAX) {
+                        nfa->states[i].one.s = &nfa->states[nfa->states[i].one.idx];
+                } else {
+                        nfa->states[i].one.s = NULL;
+                }
+                if (nfa->states[i].two.idx != SIZE_MAX) {
+                        nfa->states[i].two.s = &nfa->states[nfa->states[i].two.idx];
+                } else {
+                        nfa->states[i].two.s = NULL;
+                }
+        }
+}
 
 static size_t
 tonfa(struct re_nfa *nfa, size_t start, struct re *re)
@@ -222,13 +243,8 @@ tonfa(struct re_nfa *nfa, size_t start, struct re *re)
 
                 return b;
         case RE_CONCAT:
-                t = start;
-
-                for (size_t i = 0; i < re->res.size; ++i) {
-                        t = tonfa(nfa, t, re->res.items[i]);
-                }
-
-                return t;
+                t = tonfa(nfa, start, re->left);
+                return tonfa(nfa, t, re->right);
         }
 }
 
@@ -241,14 +257,9 @@ static struct re *charclass(char const **);
 static void
 freere(struct re *re)
 {
-        if (re->type == RE_ALT) {
+        if (re->type == RE_ALT || re->type == RE_CONCAT) {
                 freere(re->left);
                 freere(re->right);
-        } else if (re->type == RE_CONCAT) {
-                for (size_t i = 0; i < re->res.size; ++i) {
-                        freere(re->res.items[i]);
-                }
-                vec_empty(re->res);
         }
 
         free(re);
@@ -259,7 +270,8 @@ or(struct re *left, struct re *right)
 {
         if (left == NULL) {
                 return right;
-        } else if (right == NULL) {
+        }
+        if (right == NULL) {
                 return left;
         }
 
@@ -272,15 +284,29 @@ or(struct re *left, struct re *right)
 }
 
 static struct re *
+and(struct re *left, struct re *right)
+{
+        if (left == NULL) {
+                return right;
+        }
+        if (right == NULL) {
+                return left;
+        }
+
+        struct re *e;
+        mkre(e);
+        e->type  = RE_CONCAT;
+        e->left  = left;
+        e->right = right;
+        return e;
+}
+
+static struct re *
 regexp(char const **s, bool allow_trailing)
 {
-        struct re **out;
         struct re *re, *e;
 
-        mkre(e);
-        e->type = RE_CONCAT;
-        vec_init(e->res);
-        
+        e = NULL;
         while (**s && **s != '|') {
                 struct re *sub = subexp(s);
                 if (sub == NULL) {
@@ -291,8 +317,8 @@ regexp(char const **s, bool allow_trailing)
                         }
                 }
 
-                vec_push(e->res, sub, out);
-                if (out == NULL) {
+                e = and(e, sub);
+                if (e == NULL) {
                         return NULL;
                 }
         }
@@ -512,7 +538,7 @@ bool
 re_match(struct re_nfa const *nfa, char const *s, struct re_result *result)
 {
         char *end;
-        if (end = domatch(nfa->states.items[0], s, s), end != NULL) {
+        if (end = domatch(nfa->states, s, s), end != NULL) {
                 if (result != NULL) {
                         result->start = s;
                         result->end   = end;
@@ -521,7 +547,7 @@ re_match(struct re_nfa const *nfa, char const *s, struct re_result *result)
         }
 
         while (*++s) {
-                if (end = domatch(nfa->states.items[0], s, NULL), end != NULL) {
+                if (end = domatch(nfa->states, s, NULL), end != NULL) {
                         if (result != NULL) {
                                 result->start = s;
                                 result->end   = end;
@@ -543,7 +569,9 @@ re_compile(char const *s)
                 return NULL;
         }
 
-        vec_init(nfa->states);
+        nfa->states = NULL;
+        nfa->count = 0;
+        nfa->alloc = 0;
 
         struct re *re = parse(s);
         if (re == NULL) {
@@ -553,6 +581,7 @@ re_compile(char const *s)
 
         addstate(nfa);
         tonfa(nfa, 0, re);
+        complete(nfa);
 
         freere(re);
 
@@ -562,11 +591,6 @@ re_compile(char const *s)
 void
 re_free(struct re_nfa *nfa)
 {
-        for (size_t i = 0; i < nfa->states.size; ++i) {
-                free(nfa->states.items[i]);
-        }
-
-        vec_empty(nfa->states);
-
+        free(nfa->states);
         free(nfa);
 }
