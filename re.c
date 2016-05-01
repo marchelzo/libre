@@ -8,11 +8,17 @@
 
 #include "re.h"
 
+#define L(c) ((c) >> 8)
+#define H(c) ((c) &  0xFF)
+
 enum {
-        NFA_EPSILON = UINT16_MAX,
-        NFA_ANYCHAR = UINT16_MAX - 1,
-        NFA_BEGIN   = UINT16_MAX - 2,
-        NFA_END     = UINT16_MAX - 3
+        NFA_CHAR,
+        NFA_EPSILON,
+        NFA_ANYCHAR,
+        NFA_CLASS,
+        NFA_NCLASS,
+        NFA_BEGIN,
+        NFA_END,
 };
 
 struct re {
@@ -24,17 +30,17 @@ struct re {
                 RE_OPTION,
                 RE_DOT,
                 RE_CONCAT,
-                RE_RANGE,
+                RE_CLASS,
+                RE_NCLASS,
                 RE_BEGIN,
                 RE_END
         } type;
-
         union {
                 uint8_t c;
 
                 struct {
-                        uint8_t low;
-                        uint8_t high;
+                        uint8_t n;
+                        uint16_t *class;
                 };
 
                 struct {
@@ -46,14 +52,15 @@ struct re {
         };
 };
 
+struct transition {
+        uint8_t t;
+        uint8_t c;
+        uint16_t *class;
+        union { struct st *s; size_t idx; };
+};
+
 struct st {
-        struct {
-                union {
-                        struct st *s;
-                        size_t idx;
-                };
-                uint16_t t;
-        } one, two;
+        struct transition one, two;
 };
 
 
@@ -61,6 +68,11 @@ struct re_nfa {
         struct st *states;
         size_t count;
         size_t alloc;
+};
+
+struct frame {
+        char const *s;
+        struct st const *state;
 };
 
 /*
@@ -92,15 +104,17 @@ addstate(struct re_nfa *nfa)
         return nfa->count - 1;
 }
 
-static void
+static struct transition *
 transition(struct re_nfa *nfa, size_t from, size_t to, uint16_t type)
 {
         if (nfa->states[from].one.idx == SIZE_MAX) {
                 nfa->states[from].one.idx = to;
                 nfa->states[from].one.t = type;
+                return &nfa->states[from].one;
         } else if (nfa->states[from].two.idx == SIZE_MAX) {
                 nfa->states[from].two.idx = to;
                 nfa->states[from].two.t = type;
+                return &nfa->states[from].two;
         } else {
                 assert(false);
         }
@@ -126,17 +140,14 @@ complete(struct re_nfa *nfa)
 static size_t
 tonfa(struct re_nfa *nfa, size_t start, struct re *re)
 {
+        struct transition *tr;
         size_t a, b, c;
         size_t t, v;
 
         switch (re->type) {
         case RE_CHAR:
                 a = addstate(nfa);
-                transition(nfa, start, a, re->c);
-                return a;
-        case RE_RANGE:
-                a = addstate(nfa);
-                transition(nfa, start, a, (re->low << 8) + re->high);
+                transition(nfa, start, a, RE_CHAR)->c = re->c;
                 return a;
         case RE_BEGIN:
                 a = addstate(nfa);
@@ -145,6 +156,18 @@ tonfa(struct re_nfa *nfa, size_t start, struct re *re)
         case RE_END:
                 a = addstate(nfa);
                 transition(nfa, start, a, NFA_END);
+                return a;
+        case RE_CLASS:
+                a = addstate(nfa);
+                tr = transition(nfa, start, a, NFA_CLASS);
+                tr->class = re->class;
+                tr->c = re->n;
+                return a;
+        case RE_NCLASS:
+                a = addstate(nfa);
+                tr = transition(nfa, start, a, NFA_NCLASS);
+                tr->class = re->class;
+                tr->c = re->n;
                 return a;
         case RE_ALT:
                 /* End state */
@@ -429,42 +452,93 @@ atom(char const **s)
         }
 }
 
+static bool
+searchclass(uint16_t const *class, int n, uint8_t c)
+{
+        int lo = 0;
+        int hi = n - 1;
+
+        while (lo <= hi) {
+                int m = (lo + hi) / 2;
+                if      (c < L(class[m])) hi = m - 1;
+                else if (c > H(class[m])) lo = m + 1;
+                else                      return true;
+        }
+
+        return false;
+}
+
+static int
+classcmp(void const *ap, void const *bp)
+{
+        uint16_t const *a = ap;
+        uint16_t const *b = bp;
+        return (*a << 8) - (*b << 8);
+}
+
 static struct re *
 charclass(char const **s)
 {
+        if (**s == '\0')
+                return NULL;
+
+        bool negate = **s == '^';
+        if (negate)
+                *s += 1;
+
+        uint8_t n = 0;
+        for (int i = 0; (*s)[i] != '\0'; ++n) {
+                if ((*s)[i] == ']' && i != 0)
+                        break;
+                if ((*s)[i + 1] == '-' && (*s)[i + 2] != '\0' && (*s)[i + 2] != ']')
+                        i += 3;
+                else
+                        i += 1;
+        }
+
+        uint16_t *class = malloc(n * sizeof *class);
+        if (class == NULL)
+                return NULL;
+
+        for (int i = 0; i < n; ++i, ++*s) {
+                if ((*s)[1] == '-' && (*s)[2] != '\0' && (*s)[2] != ']') {
+                        class[i] = ((*s)[0] << 8) + (*s)[2];
+                        *s += 2;
+                } else {
+                        class[i] = (**s << 8) + **s;
+                }
+        }
+
         if (**s == '\0') {
+                free(class);
                 return NULL;
         }
 
-        struct re *e = NULL;
-        struct re *c;
-        for (size_t i = 0; **s != '\0'; ++i, ++*s) {
-                if (**s == ']' && i != 0) {
-                        break;
-                }
-                mkre(c);
-                if ((*s)[1] == '-' && (*s)[2] != '\0' && (*s)[2] != ']') {
-                        c->type = RE_RANGE;
-                        c->low  = (*s)[0];
-                        c->high = (*s)[2];
-                        *s += 2;
-                } else {
-                        c->type = RE_CHAR;
-                        c->c    = **s;
-                }
-                e = or(e, c);
-                if (e == NULL) {
-                        goto fail;
-                }
-        }
-        if (**s == '\0') {
-                goto fail;
-        }
         *s += 1;
+
+
+        qsort(class, n, sizeof *class, classcmp);
+        
+        for (int i = 0; i < n; ++i) {
+                uint8_t high = H(class[i]);
+                int j = i + 1;
+                while (j < n && L(class[j]) <= high + 1) {
+                        if (H(class[j]) > high)
+                                high = H(class[j]);
+                        ++j;
+                }
+                class[i] = (L(class[i]) << 8) + high;
+                memmove(class + i + 1, class + j, (n - j) * sizeof *class);
+                n -= (j - i - 1);
+        }
+
+        struct re *e;
+        mkre(e);
+        e->type = negate? RE_NCLASS: RE_CLASS;
+        e->class = class;
+        e->n = n;
+
         return e;
-fail:
-        freere(e);
-        return NULL;
 }
 
 static struct re *
@@ -473,68 +547,56 @@ parse(char const *s)
         return regexp(&s, false);
 }
 
-static bool
-charmatch(char const **s, uint16_t t, char const *begin)
+inline static bool
+charmatch(char const **s, struct transition const *tr, char const *begin)
 {
-        if (t == NFA_EPSILON) {
-                return true;
+        switch (tr->t) {
+        case NFA_EPSILON: return true;
+        case NFA_ANYCHAR: return (**s != '\0') && ++*s;
+        case NFA_BEGIN:   return *s == begin;
+        case NFA_END:     return **s == '\0';
+        case NFA_CLASS:   return **s != '\0' && searchclass(tr->class, tr->c, **s) && ++*s;
+        case NFA_NCLASS:  return **s != '\0' && !searchclass(tr->class, tr->c, **s) && ++*s;
+        case NFA_CHAR:    return **s == tr->c && ++*s;
+        default:          assert(false);
         }
-
-        if (t == NFA_ANYCHAR) {
-                if (**s != '\0') {
-                        *s += 1;
-                        return true;
-                } else {
-                        return false;
-                }
-        }
-
-        if (t == NFA_BEGIN) {
-                return *s == begin;
-        }
-
-        if (t == NFA_END) {
-                return **s == '\0';
-        }
-
-        if (t > UINT8_MAX) {
-                if (**s < (t >> 8) || **s > (t & 0xFF)) {
-                        return false;
-                }
-                *s += 1;
-                return true;
-        }
-
-        if (**s == t) {
-                *s += 1;
-                return true;
-        }
-
-        return false;
 }
 
 static char *
-domatch(struct st const *state, char const *s, char const *begin)
+domatch(struct st const *state, char const *string, char const *begin)
 {
-        char const *save, *end;
+        struct frame *stack = malloc(8 * sizeof *stack);
+        int capacity = 8;
+        int i = 0;
 
-        if (state->one.s == NULL) {
-                assert(state->two.s == NULL);
-                return s;
-        }
+        if (stack == NULL)
+                goto end;
 
-        save = s;
+        stack[i++] = (struct frame){ .s = string, .state = state };
 
-        if (charmatch(&s, state->one.t, begin)) {
-                if (end = domatch(state->one.s, s, begin), end != NULL) {
-                        return end;
+        while (i != 0) {
+                struct frame f =  stack[--i];
+                char const *s = f.s;
+
+                if (i + 2 >= capacity) {
+                        capacity *= 2;
+                        struct frame *tmp = realloc(stack, capacity * sizeof *stack);
+                        if (tmp == NULL)
+                                goto end;
+                        else
+                                stack = tmp;
                 }
+
+                if (f.state->one.s == NULL)
+                        return f.s;
+                if (f.state->two.s != NULL && charmatch(&s, &f.state->two, begin))
+                        stack[i++] = (struct frame){ .s = s, .state = f.state->two.s };
+                if (charmatch(&f.s, &f.state->one, begin))
+                        stack[i++] = (struct frame){ .s = f.s, .state = f.state->one.s };
         }
 
-        if (state->two.s != NULL) {
-                return domatch(state->two.s, save, begin);
-        }
-
+end:
+        free(stack);
         return NULL;
 }
 
